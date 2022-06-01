@@ -5,6 +5,7 @@
 #include <cstring>
 #include <string>
 #include <map>
+#include <queue>
 #include <unistd.h> // for write
 #include <pthread.h>
 #include <sys/types.h>
@@ -14,43 +15,72 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include "commonFuncs.h"
 
 #define PATH "./"
 
-void close_report(int fd) {
-    while (close(fd) == -1) {
-        if (errno != EINTR) {
-            perror("close");
-            break;
-        }
-    }
-}
+typedef struct {
+    std::string path;
+    int socket;
+} task;
 
-int safe_write_bytes(int fd, const char *buf, size_t count) {
-    int written;
-    while ((written = write(fd, buf, count)) < count) {
-        if ((written < 0) && (errno != EINTR)) {
-            return -1;
-        }
-        buf += count;
-        count -= written;
-    }
-    return 0;
-}
-
-int block_size;
+int block_size, queue_size;
 
 std::map<int,int> *tasks_remaining;
+std::queue<task> *tasks;
 
-pthread_mutex_t map_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond_nonempty = PTHREAD_COND_INITIALIZER;
+pthread_cond_t cond_nonfull = PTHREAD_COND_INITIALIZER;
+pthread_cond_t cond_done = PTHREAD_COND_INITIALIZER;
 
 void *worker_thread(void *arg) {
     write(1, "Worker starting\n", 16);
-    pthread_detach(pthread_self());
-    pthread_exit(NULL);
+    task current_task;
+    /* Main worker loop */
+    while (1) {
+        /* Wait for an available task */
+        pthread_mutex_lock(&queue_lock);
+        while (tasks->empty()) {
+            pthread_cond_wait(&cond_nonempty, &queue_lock);
+        }
+        current_task = tasks->front();
+        tasks->pop();
+        pthread_mutex_unlock(&queue_lock);
+        pthread_cond_signal(&cond_nonfull);
+
+        // lock socket mutex
+        /* Do task */
+        int fd;
+        if ((fd = open(cur_path.data(), O_RDONLY)) < 0) {
+            perror("dataServer: open file");
+            return -1;
+        }
+        cur_path.erase(0, strlen(PATH));
+        cur_path = cur_path + " " + std::to_string(stat_buf.st_size) + " ";
+        if (safe_write_bytes(sock, cur_path.data(), cur_path.size()) < 0) {
+            perror("dataServer: write to socket");
+            return -1;
+        }
+        char buf[block_size];
+        int nread;
+        while ((nread = read(fd, buf, block_size)) > 0) {
+            if (safe_write_bytes(sock, buf, nread) < 0) {
+                perror("dataServer: write to socket");
+                return -1;
+            }
+        }
+        if (nread < 0) {
+            perror("dataServer: read file");
+            return -1;
+        }
+        close_report(fd);
+        //unlock socket mutex
+        //update tasks_remaining
+    }
 }
 
-int traverse_directory(std::string path, int sock) {
+int traverse_directory(std::string path, int sock, pthread_mutex_t *lock_data_transfer, pthread_mutex_t *lock_tasks_remaining, int *tasks_remaining) {
     DIR *cur_dir;
     struct dirent *cur_file;
     std::string cur_path;
@@ -77,36 +107,41 @@ int traverse_directory(std::string path, int sock) {
             return -1;
         }
         if ((stat_buf.st_mode & S_IFMT) == S_IFREG) {
-            printf("%s", cur_path.data());
-            fflush(stdout);
+            pthread_mutex_lock(lock_tasks_remaining);
+            (*tasks_remaining)++;
+            pthread_mutex_unlock(lock_tasks_remaining);
+
+            task new_task;
+            new_task.path = cur_path;
+            new_task.socket = sock;
+            pthread_mutex_lock(&queue_lock);
+            while (tasks->size() >= queue_size) {
+                pthread_cond_wait(&cond_nonfull, &queue_lock);
+            }
+            tasks->push(new_task);
+            pthread_mutex_unlock(&queue_lock);
+            pthread_cond_signal(&cond_nonempty);
             int fd;
             if ((fd = open(cur_path.data(), O_RDONLY)) < 0) {
-                perror("remoteClient: open file");
+                perror("dataServer: open file");
                 return -1;
             }
-            printf(" opened file ");
-            fflush(stdout);
+            cur_path.erase(0, strlen(PATH));
             cur_path = cur_path + " " + std::to_string(stat_buf.st_size) + " ";
             if (safe_write_bytes(sock, cur_path.data(), cur_path.size()) < 0) {
-                perror("remoteClient: write to socket");
+                perror("dataServer: write to socket");
                 return -1;
             }
-            printf(" written header ");
-            fflush(stdout);
             char buf[block_size];
             int nread;
             while ((nread = read(fd, buf, block_size)) > 0) {
                 if (safe_write_bytes(sock, buf, nread) < 0) {
-                    perror("remoteClient: write to socket");
-                    return -1;
-                }//test<---------------------------------
-                if (safe_write_bytes(1, buf, nread) < 0) {
-                    perror("remoteClient: write to socket");
+                    perror("dataServer: write to socket");
                     return -1;
                 }
             }
             if (nread < 0) {
-                perror("remoteClient: read file");
+                perror("dataServer: read file");
                 return -1;
             }
             close_report(fd);
@@ -115,13 +150,40 @@ int traverse_directory(std::string path, int sock) {
             traverse_directory(cur_path, sock);
         }
     }
+    closedir(cur_dir);
     return 0;
 }
 
 void *communication_thread(void *void_t_socket) {
+    write(1, "Communication starting\n", 23);
     /* Turn socket to int */
     int socket = *(int*) void_t_socket;
-    write(1, "Communication starting\n", 23);
+    /* Create socket-specific mutexes */
+    pthread_mutex_t *lock_data_transfer;
+    if ((lock_data_transfer = (pthread_mutex_t *) malloc(sizeof(pthread_mutex_t))) == NULL) {
+        perror("dataServer: malloc");
+        close_report(socket);
+        pthread_detach(pthread_self());
+        pthread_exit(NULL);
+    }
+    pthread_mutex_init(lock_data_transfer, 0);
+    pthread_mutex_t *lock_tasks_remaining;
+    if ((lock_tasks_remaining = (pthread_mutex_t *) malloc(sizeof(pthread_mutex_t))) == NULL) {
+        perror("dataServer: malloc");
+        close_report(socket);
+        pthread_detach(pthread_self());
+        pthread_exit(NULL);
+    }
+    pthread_mutex_init(lock_tasks_remaining, 0);
+    /* Create counter for remaining tasks */
+    int *tasks_remaining;
+    if ((tasks_remaining = (int *) malloc(sizeof(int))) == NULL) {
+        perror("dataServer: malloc");
+        close_report(socket);
+        pthread_detach(pthread_self());
+        pthread_exit(NULL);
+    }
+    *tasks_remaining = 0;
     /* Read path from client */
     int nread;
     char buf[50];
@@ -129,7 +191,7 @@ void *communication_thread(void *void_t_socket) {
     std::string data_read;  // data from socket passed to memory
     while (((nread = read(socket, buf, 50)) > 0) || (errno == EINTR)) {
         /* After reading a chunk, process it character by character in memory */
-        for (uint i = 0 ; i < nread ; i++) {
+        for (int i = 0 ; i < nread ; i++) {
             /* Start reading path after space */
             if (buf[i] == ' ') {
                 path_size = atoi(data_read.data());
@@ -159,11 +221,21 @@ void *communication_thread(void *void_t_socket) {
         pthread_exit(NULL);
     }
     data_read = PATH + data_read;
-    if (traverse_directory(data_read, socket) == -1) {
+    if (traverse_directory(data_read, socket, lock_data_transfer, lock_tasks_remaining, tasks_remaining) == -1) {
         close_report(socket);
         pthread_detach(pthread_self());
         pthread_exit(NULL);
     }
+
+    /* Wait for all tasks to end */
+    pthread_mutex_lock(lock_tasks_remaining);
+    while (*tasks_remaining) {
+        pthread_cond_wait(&cond_done, lock_tasks_remaining);
+    }
+    pthread_mutex_unlock(lock_tasks_remaining);
+
+    /* Close socket and thread */
+    close_report(socket);
     pthread_detach(pthread_self());
     pthread_exit(NULL);
 }
@@ -174,7 +246,7 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "Invalid number of arguments\n");
         exit(EXIT_FAILURE);
     }
-    int port, thread_pool_size, queue_size;
+    int port, thread_pool_size;
 	for (int i = 1 ; i < 9 ; i += 2) { 
 		if (!strcmp(argv[i], "-p")) {
 			port = atoi(argv[i + 1]);
@@ -214,8 +286,9 @@ int main(int argc, char* argv[]) {
         }
     }
     
-    /* Create map */
+    /* Create structures */
     tasks_remaining = new std::map<int,int>;
+    tasks = new std::queue<task>;
 
     /* Create socket */
     int sock;
@@ -267,7 +340,7 @@ int main(int argc, char* argv[]) {
     }
 
     free(worker_threads);
-    printf("Exiting main");
+    printf("Server ending\n");
     fflush(stdout);
     /* Exiting successfully */
     exit(EXIT_SUCCESS);
