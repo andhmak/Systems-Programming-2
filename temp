@@ -1,0 +1,168 @@
+/* File: dataServer.cpp */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <cstring>
+#include <string>
+#include <unistd.h> // for write
+#include <pthread.h>
+#include <sys/types.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <linux/limits.h>
+
+void *worker_thread(void *arg) {
+    write(1, "Worker starting\n", 16);
+    pthread_detach(pthread_self());
+    pthread_exit(NULL);
+}
+void *communication_thread(void *void_t_socket) {
+    /* Turn socket to int */
+    int socket = *(int*) void_t_socket;
+    write(1, "Communication starting\n", 23);
+    /* Read path from client */
+    int nread;
+    char buf[50];
+    int path_size = 0;      // size of the path sent by the client in bytes
+    std::string data_read;  // data from socket passed to memory
+    while (nread = read(socket, buf, 50) > 0) {
+        printf("nread: %s\n", buf);
+        fflush(stdout);
+        /* After reading a chunk, process it character by character in memory */
+        for (uint i = 0 ; i < nread ; i++) {
+            /* Start reading path after space */
+            if (buf[i] == ' ') {
+                path_size = atoi(data_read.data());
+                data_read.erase();
+            }
+            else {
+                data_read.push_back(buf[i]);
+            }
+        }
+        printf("2nread: %d\n", nread);
+        fflush(stdout);
+        /* Stop reading if whole path read */
+        if ((path_size != 0) && (data_read.size() == path_size)) {
+            break;
+        }
+    }
+    /* If read failed, close the thread */
+    if (nread == -1) {
+        perror("dataServer: read from socket");
+        close(socket);
+        pthread_detach(pthread_self());
+        pthread_exit(NULL);
+    }
+    /* If client closed connection, close the thread */
+    if (nread == 0) {
+        write(2, "dataServer: client closed socket", 32);
+        close(socket);
+        pthread_detach(pthread_self());
+        pthread_exit(NULL);
+    }
+    write(1, data_read.data(), data_read.size());
+    pthread_detach(pthread_self());
+    pthread_exit(NULL);
+}
+
+int main(int argc, char* argv[]) {
+	/* Initialising parameters */
+    if (argc != 9) {
+        fprintf(stderr, "Invalid number of arguments\n");
+        exit(EXIT_FAILURE);
+    }
+    int port, thread_pool_size, queue_size, block_size;
+	for (int i = 1 ; i < 9 ; i += 2) { 
+		if (!strcmp(argv[i], "-p")) {
+			port = atoi(argv[i + 1]);
+		}
+        else if (!strcmp(argv[i], "-s")) {
+			thread_pool_size = atoi(argv[i + 1]);
+        }
+        else if (!strcmp(argv[i], "-q")) {
+			queue_size = atoi(argv[i + 1]);
+        }
+        else if (!strcmp(argv[i], "-b")) {
+			block_size = atoi(argv[i + 1]);
+        }
+        else {
+            fprintf(stderr, "Invalid passing of arguments\n");
+            exit(EXIT_FAILURE);
+        }
+	}
+
+    /* Print parameters */
+    printf("Server’s parameters are:\n");
+    printf("port: %d\n", port);
+    printf("thread_pool_size: %d\n", thread_pool_size);
+    printf("queue_size: %d\n", queue_size);
+    printf("Block_size: %d\n", block_size);
+
+    /* Creating worker threads */
+    pthread_t *worker_threads;
+    if ((worker_threads = (pthread_t *) malloc(thread_pool_size*sizeof(pthread_t))) == NULL) {
+        perror("dataServer: malloc");
+        exit(EXIT_FAILURE);
+    }
+    for (int i = 0 ; i < thread_pool_size ; i++) {
+        if (pthread_create(worker_threads + i, NULL, worker_thread, NULL) != 0) {
+            perror("dataServer: create worker thread");
+            exit(EXIT_FAILURE);
+        }
+    }
+    
+    /* Create socket */
+    int sock;
+    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        perror("dataServer: create socket");
+        exit(EXIT_FAILURE);
+    }
+    
+    /* Bind socket to address */
+    struct sockaddr_in server;
+    server.sin_family = AF_INET;    /* Internet domain */
+    server.sin_addr.s_addr = htonl(INADDR_ANY);
+    server.sin_port = htons(port);  /* The given port */
+    if (bind(sock, (sockaddr*) &server, sizeof(server)) < 0) {
+        perror("dataServer: bind socket");
+        exit(EXIT_FAILURE);
+    }
+    /* Listen for connections */
+    if (listen(sock, 5) < 0) {
+        perror("dataServer: socket listen");
+        exit(EXIT_FAILURE);
+    }
+    printf("Server was successfully initialized...\n");
+    printf("Listening for connections to port %d\n", port);
+    /* Main server loop */
+    while (1) {
+        int *newsock;
+        struct sockaddr_in client;
+        socklen_t clientlen = sizeof(client);
+        if ((newsock = (int *) malloc(sizeof(int))) == NULL) {
+            perror("dataServer: malloc");
+            exit(EXIT_FAILURE);
+        }
+        /* Accept connection */
+        if ((*newsock = accept(sock, (sockaddr*) &client, &clientlen)) < 0){
+            perror("dataServer: accept connection");
+            exit(EXIT_FAILURE);
+        }
+        /* Find and print client's name */
+        struct hostent *rem;
+        if ((rem = gethostbyaddr((char *) &client.sin_addr.s_addr, sizeof(client.sin_addr.s_addr), client.sin_family)) == NULL) {
+            perror("dataServer: gethostbyaddr");
+            exit(EXIT_FAILURE);
+        }
+        printf("Accepted connection from %s\n", rem->h_name);
+        /* Create communication thread for this client */
+        pthread_t com_thread_id;
+        pthread_create(&com_thread_id, NULL, communication_thread, (void *) newsock);
+    }
+
+    free(worker_threads);
+    
+    /* Exiting successfully */
+    exit(EXIT_SUCCESS);
+}
