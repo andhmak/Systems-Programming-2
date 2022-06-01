@@ -91,7 +91,7 @@ int main(int argc, char* argv[]) {
             /* If reading the header */
             if (state != 2) {
                 /* Spaces act as message boundaries */
-                if (buf[i] == ' ') {
+                if (buf[i] == '\0') {
                     state++;
                     /* The first part is the file name */
                     if (state == 1) {

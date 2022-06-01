@@ -5,8 +5,19 @@
 #include <unistd.h>
 #include "commonFuncs.h"
 
+/* Closes file fd points to and calls perror in case of error, retrying if interrupted */
 void close_report(int fd) {
     while (close(fd) == -1) {
+        if (errno != EINTR) {
+            perror("close");
+            break;
+        }
+    }
+}
+
+/* Closes directory fd points to and calls perror in case of error, retrying if interrupted */
+void closedir_report(DIR *dir) {
+    while (closedir(dir) == -1) {
         if (errno != EINTR) {
             perror("close");
             break;
