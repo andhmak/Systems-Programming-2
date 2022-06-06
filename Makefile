@@ -30,11 +30,11 @@ all: bin/dataServer bin/remoteClient
 
 run_server: bin/dataServer
 	@echo " Run dataServer with default arguments ...";
-	./bin/dataServer -p 12510 -s 2 -q 2 -b 512
+	./bin/dataServer -p 12501 -s 2 -q 2 -b 512
 
 run_client: bin/remoteClient
 	@echo " Run remoteClient with default arguments ...";
-	./bin/remoteClient -i 127.0.0.1 -p 12510 -d Server
+	./bin/remoteClient -i 127.0.0.1 -p 12501 -d ../sdi1900047_ergasia_2
 
 clean:
 	@echo " Delete binary and build ...";

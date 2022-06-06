@@ -68,10 +68,15 @@ int main(int argc, char* argv[]) {
     }
 
     /* Communicate with server */
-
+    /* Send the size of the desired path */
+    uint32_t path_size = htonl(strlen(directory));
+    if (safe_write_bytes(sock, (const char *) &(path_size), sizeof(uint32_t)) < 0) {
+        perror("dataServer: write to socket");
+        close_report(sock);
+        exit(EXIT_FAILURE);
+    }
     /* Send the desired path */
-    std::string message = std::to_string(strlen(directory)) + " " + directory;
-    if (safe_write_bytes(sock, message.data(), message.size()) < 0) {
+    if (safe_write_bytes(sock, directory, strlen(directory)) < 0) {
         perror("remoteClient: write to socket");
         close_report(sock);
         exit(EXIT_FAILURE);
@@ -80,59 +85,24 @@ int main(int argc, char* argv[]) {
     /* Process the results */
     int nread;
     char buf[50];
-    int fd;                 // file descriptor of the newly copied file
-    std::string file_name;  // name (path) of the file sent by the server
-    int file_size = 0;      // size of the file sent by the server in bytes
-    std::string data_read;  // data from socket passed to memory
-    char state = 0;         // specifying how the current bytes read should be interpreted
+    int fd;                     // file descriptor of the newly copied file
+    std::string file_name;      // name (path) of the file sent by the server
+    uint32_t file_size = 0;     // size of the file sent by the server in bytes
+    std::string data_read;      // data from socket passed to memory
+    int to_write;               // bytes remaiining to write to the file
+    char state = 0;             // specifying how the current bytes read should be interpreted
     while (((nread = read(sock, buf, 50)) > 0) || (errno == EINTR)) {
         /* After reading a chunk from the header, process it character by character in memory */
         for (int i = 0 ; i < nread ; i++) {
-            /* If reading the header */
-            if (state != 2) {
-                /* Spaces act as message boundaries */
+            /* If reading the file name */
+            if (state == 0) {
+                /* Nul acts as message boundary */
                 if (buf[i] == '\0') {
                     state++;
-                    /* The first part is the file name */
                     if (state == 1) {
+                        //printf("%s\n", data_read.data());
+                        //fflush(stdout);
                         file_name = OUTPUT + data_read;
-                    }
-                    /* The second is the file size */
-                    else if (state == 2) {
-                        file_size = atoi(data_read.data());
-                        /* Create file, creating parent directories if they don't exist */
-                        for (int j = 0 ; j < file_name.size() ; j++) {
-                            if (file_name[j] == '/') {
-                                std::string dir_path = file_name.substr(0,j);
-                                while (file_name[j+1] == '/') {
-                                    j++;
-                                }
-                                DIR* dir = opendir(dir_path.data());
-                                /* If directory exists, close it */
-                                if (dir) {
-                                    closedir(dir);
-                                }
-                                /* If not, create it */
-                                else if (ENOENT == errno) {
-                                    if (mkdir(dir_path.data(), 0755) < 0) {
-                                        perror("remoteClient: opendir");
-                                        close_report(sock);
-                                        exit(EXIT_FAILURE);
-                                    }
-                                }
-                                else {
-                                    perror("remoteClient: opendir");
-                                    close_report(sock);
-                                    exit(EXIT_FAILURE);
-                                }
-                            }
-                        }
-                        //printf("%s",file_name.data());
-                        if ((fd = creat(file_name.data(), 0644)) < 0) {
-                            perror("remoteClient: create file");
-                            close_report(sock);
-                            exit(EXIT_FAILURE);
-                        }
                     }
                     data_read.erase();
                 }
@@ -140,11 +110,70 @@ int main(int argc, char* argv[]) {
                     data_read.push_back(buf[i]);
                 }
             }
+            /* If reading the size of the file */
+            else if ((state >= 1) && (state <= sizeof(uint32_t))) {
+                state++;
+                data_read.push_back(buf[i]);
+                //printf("state=%d, %u\n", state,buf[i]);
+                //fflush(stdout);
+                /* The second is the file size */
+                if (state == (sizeof(uint32_t) + 1)) {
+                    memcpy(&file_size, data_read.data(), sizeof(uint32_t));
+                    //file_size = *(data_read.data());
+                    file_size = ntohl(file_size);
+                    //printf("%c\n", *(data_read.data()));
+                    //printf("%d\n", file_size);
+                    //fflush(stdout);
+                    /* Create file, creating parent directories if they don't exist */
+                    for (int j = 0 ; j < file_name.size() ; j++) {
+                        if (file_name[j] == '/') {
+                            std::string dir_path = file_name.substr(0,j);
+                            while (file_name[j+1] == '/') {
+                                j++;
+                            }
+                            DIR* dir = opendir(dir_path.data());
+                            /* If directory exists, close it */
+                            if (dir) {
+                                closedir(dir);
+                            }
+                            /* If not, create it */
+                            else if (ENOENT == errno) {
+                                if (mkdir(dir_path.data(), 0755) < 0) {
+                                    perror("remoteClient: opendir");
+                                    close_report(sock);
+                                    exit(EXIT_FAILURE);
+                                }
+                            }
+                            else {
+                                perror("remoteClient: opendir");
+                                close_report(sock);
+                                exit(EXIT_FAILURE);
+                            }
+                        }
+                    }
+                    //printf("%s",file_name.data());
+                    /* Delete file if it already exists */
+                    if ((unlink(file_name.data()) < 0) && (errno != ENOENT)) {
+                        perror("remoteClient: unlink file");
+                        close_report(sock);
+                        exit(EXIT_FAILURE);
+                    }
+                    if ((fd = creat(file_name.data(), 0644)) < 0) {
+                        perror("remoteClient: create file");
+                        close_report(sock);
+                        exit(EXIT_FAILURE);
+                    }
+                    data_read.erase();
+                }
+            }
             /* If reading the third part of the message (file data) add it to the file in chunks (not byte by byte) */
             else {
                 int to_write = (nread - i) < file_size ? nread - i : file_size;
+                //printf("%d bytes to write\n", to_write);
+                //fflush(stdout);
                 if (safe_write_bytes(fd, buf + i, to_write) < 0) {
                     perror("remoteClient: write to file");
+                    close_report(fd);
                     close_report(sock);
                     exit(EXIT_FAILURE);
                 }
@@ -160,14 +189,19 @@ int main(int argc, char* argv[]) {
             }
         }
     }
+    /* Close the connection */
+    close_report(sock);
     /* If read failed, exit with failure */
     if (nread == -1) {
         perror("remoteClient: read from socket");
-        close_report(sock);
         exit(EXIT_FAILURE);
     }
-    
-    /* Close socket and exit successfully */
-    close_report(sock);
+    /* If server closed connection early, exit with failure */
+    if ((file_size != 0) || (data_read.size() != 0)) {
+        fprintf(stderr, "remoteClient: server closed unexpectedly\n");
+        exit(EXIT_FAILURE);
+    }
+
+    /* Exit successfully */
     exit(EXIT_SUCCESS);
 }
