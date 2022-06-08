@@ -93,7 +93,7 @@ int main(int argc, char* argv[]) {
                 /* Nul acts as message boundary */
                 if (buf[i] == '\0') {
                     /* If we got the message that we're done, stop reading */
-                    if (!strcmp(data_read.data(), "a")) {
+                    if (data_read.size() == 0) {
                         done = 1;
                         break;
                     }

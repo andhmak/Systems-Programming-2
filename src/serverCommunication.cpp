@@ -203,7 +203,7 @@ void *communication_thread(void *void_t_socket_id) {
     pthread_mutex_unlock(sock_info.lock_tasks_remaining);
 
     /* Notify the client that we're done */
-    if (safe_write_bytes(sock_info.sock_id, "a", 2) < 0) {
+    if (safe_write_bytes(sock_info.sock_id, "", 1) < 0) {
         perror("dataServer: write to socket");
         free_socket(sock_info);
         pthread_exit(NULL);
