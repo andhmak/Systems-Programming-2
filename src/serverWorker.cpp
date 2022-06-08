@@ -53,6 +53,11 @@ void *worker_thread(void *arg) {
         int fd;
         if ((fd = open(current_task.path.data(), O_RDONLY)) < 0) {
             perror("dataServer: open file");
+            /* If there are no permissions on this file, just skip it */
+            if (errno == EACCES) {
+                finish_task(current_task);
+                continue;
+            }
             close_report(current_task.sock_info.sock_id);
             exit(EXIT_FAILURE);
         }

@@ -42,12 +42,10 @@ int main(int argc, char* argv[]) {
             exit(EXIT_FAILURE);
         }
 	}
-
-    /* Print parameters  */
-    //printf("Client’s parameters are:\n");
-    //printf("serverIP: %s\n", server_ip_name);
-    //printf("port: %d\n", server_port);
-    //printf("directory: %s\n", directory);
+    if (directory[strlen(directory) - 1] == '/') {
+        fprintf(stderr, "Requested directory shouldn't end with '/'\n");
+        exit(EXIT_FAILURE);
+    }
 
     /* Create socket */
     int sock;
@@ -57,7 +55,6 @@ int main(int argc, char* argv[]) {
     }
 
     /* Initiate connection */
-    //printf("Connecting to %s on port %d\n", server_ip_name, server_port);
     struct sockaddr_in server;
     server.sin_family = AF_INET;            /* Internet domain */
     server.sin_addr.s_addr = server_ip;
@@ -68,15 +65,11 @@ int main(int argc, char* argv[]) {
     }
 
     /* Communicate with server */
-    /* Send the size of the desired path */
-    uint32_t path_size = htonl(strlen(directory));
-    if (safe_write_bytes(sock, (const char *) &(path_size), sizeof(uint32_t)) < 0) {
-        perror("dataServer: write to socket");
-        close_report(sock);
-        exit(EXIT_FAILURE);
-    }
+
     /* Send the desired path */
-    if (safe_write_bytes(sock, directory, strlen(directory)) < 0) {
+    std::string request = directory;
+    request.push_back('\0');
+    if (safe_write_bytes(sock, request.data(), request.size()) < 0) {
         perror("remoteClient: write to socket");
         close_report(sock);
         exit(EXIT_FAILURE);
@@ -91,19 +84,24 @@ int main(int argc, char* argv[]) {
     std::string data_read;      // data from socket passed to memory
     int to_write;               // bytes remaiining to write to the file
     char state = 0;             // specifying how the current bytes read should be interpreted
+    char done = 0;              // whether all transfer is complete
     while (((nread = read(sock, buf, 50)) > 0) || (errno == EINTR)) {
-        /* After reading a chunk from the header, process it character by character in memory */
+        /* After reading a block from the socket, process it in memory */
         for (int i = 0 ; i < nread ; i++) {
-            /* If reading the file name */
+            /* If reading the filename */
             if (state == 0) {
                 /* Nul acts as message boundary */
                 if (buf[i] == '\0') {
-                    state++;
-                    if (state == 1) {
-                        //printf("%s\n", data_read.data());
-                        //fflush(stdout);
-                        file_name = OUTPUT + data_read;
+                    /* If we got the message that we're done, stop reading */
+                    if (!strcmp(data_read.data(), "a")) {
+                        done = 1;
+                        break;
                     }
+                    /* If read whole filename, go to next state */
+                    state++;
+                    /* Save the filename */
+                    file_name = OUTPUT + data_read;
+                    /* Erase data read */
                     data_read.erase();
                 }
                 else {
@@ -114,16 +112,11 @@ int main(int argc, char* argv[]) {
             else if ((state >= 1) && (state <= sizeof(uint32_t))) {
                 state++;
                 data_read.push_back(buf[i]);
-                //printf("state=%d, %u\n", state,buf[i]);
-                //fflush(stdout);
-                /* The second is the file size */
+                /* If all sizeof(uint32_t) bytes read  */
                 if (state == (sizeof(uint32_t) + 1)) {
+                    /* Save the file size */
                     memcpy(&file_size, data_read.data(), sizeof(uint32_t));
-                    //file_size = *(data_read.data());
                     file_size = ntohl(file_size);
-                    //printf("%c\n", *(data_read.data()));
-                    //printf("%d\n", file_size);
-                    //fflush(stdout);
                     /* Create file, creating parent directories if they don't exist */
                     for (int j = 0 ; j < file_name.size() ; j++) {
                         if (file_name[j] == '/') {
@@ -137,9 +130,22 @@ int main(int argc, char* argv[]) {
                                 closedir(dir);
                             }
                             /* If not, create it */
-                            else if (ENOENT == errno) {
+                            else if (errno == ENOENT) {
                                 if (mkdir(dir_path.data(), 0755) < 0) {
-                                    perror("remoteClient: opendir");
+                                    perror("remoteClient: mkdir");
+                                    close_report(sock);
+                                    exit(EXIT_FAILURE);
+                                }
+                            }
+                            /* If it's something else, erase it and create a directory over it */
+                            else if (errno == ENOTDIR) {
+                                if (unlink(dir_path.data()) < 0) {
+                                    perror("remoteClient: unlink file");
+                                    close_report(sock);
+                                    exit(EXIT_FAILURE);
+                                }
+                                if (mkdir(dir_path.data(), 0755) < 0) {
+                                    perror("remoteClient: mkdir");
                                     close_report(sock);
                                     exit(EXIT_FAILURE);
                                 }
@@ -151,7 +157,6 @@ int main(int argc, char* argv[]) {
                             }
                         }
                     }
-                    //printf("%s",file_name.data());
                     /* Delete file if it already exists */
                     if ((unlink(file_name.data()) < 0) && (errno != ENOENT)) {
                         perror("remoteClient: unlink file");
@@ -163,14 +168,14 @@ int main(int argc, char* argv[]) {
                         close_report(sock);
                         exit(EXIT_FAILURE);
                     }
+                    /* Erase data read */
                     data_read.erase();
                 }
             }
             /* If reading the third part of the message (file data) add it to the file in chunks (not byte by byte) */
             else {
+                /* Write filesize bytes, or as many were read if less */
                 int to_write = (nread - i) < file_size ? nread - i : file_size;
-                //printf("%d bytes to write\n", to_write);
-                //fflush(stdout);
                 if (safe_write_bytes(fd, buf + i, to_write) < 0) {
                     perror("remoteClient: write to file");
                     close_report(fd);
@@ -179,7 +184,7 @@ int main(int argc, char* argv[]) {
                 }
                 /* Update characters processed */
                 i += to_write - 1;
-                /* Updating remaining file bytes */
+                /* Update remaining file bytes */
                 file_size -= to_write;
                 /* If file done, move to the next message */
                 if (file_size == 0) {
@@ -187,6 +192,9 @@ int main(int argc, char* argv[]) {
                     state = 0;
                 }
             }
+        }
+        if (done) {
+            break;
         }
     }
     /* Close the connection */
@@ -197,7 +205,7 @@ int main(int argc, char* argv[]) {
         exit(EXIT_FAILURE);
     }
     /* If server closed connection early, exit with failure */
-    if ((file_size != 0) || (data_read.size() != 0)) {
+    if (!done) {
         fprintf(stderr, "remoteClient: server closed unexpectedly\n");
         exit(EXIT_FAILURE);
     }
