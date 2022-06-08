@@ -1,8 +1,4 @@
 /* File: serverCommunication.h */
 
-#include <string>
-#include "serverTypes.h"
-
-int traverse_directory(std::string path, sock_info_t sock_info, int relative_path_size);
-
+/* Function to be executed by communication threads, reading the request, creating the relevant tasks and adding them to the queue */
 void *communication_thread(void *void_t_socket);

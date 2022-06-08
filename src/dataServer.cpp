@@ -55,13 +55,6 @@ int main(int argc, char* argv[]) {
             exit(EXIT_FAILURE);
         }
 	}
-
-    /* Print parameters */
-    //printf("Server’s parameters are:\n");
-    //printf("port: %d\n", port);
-    //printf("thread_pool_size: %d\n", thread_pool_size);
-    //printf("queue_size: %d\n", queue_size);
-    //printf("Block_size: %d\n", block_size);
     
     /* Create task queue */
     tasks = new std::queue<task>;
@@ -127,15 +120,6 @@ int main(int argc, char* argv[]) {
             close_report(sock);
             exit(EXIT_FAILURE);
         }
-        /* Find and print client's name */
-        //struct hostent *rem;
-        //if ((rem = gethostbyaddr((char *) &client.sin_addr.s_addr, sizeof(client.sin_addr.s_addr), client.sin_family)) == NULL) {
-        //    perror("dataServer: gethostbyaddr");
-        //    delete tasks;
-        //    close_report(sock);
-        //    exit(EXIT_FAILURE);
-        //}
-        //printf("Accepted connection from %s\n", rem->h_name);
         /* Create communication thread for this client */
         pthread_t com_thread_id;
         if (pthread_create(&com_thread_id, NULL, communication_thread, (void *) newsock) != 0) {
