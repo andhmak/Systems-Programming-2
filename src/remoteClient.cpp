@@ -44,10 +44,10 @@ int main(int argc, char* argv[]) {
 	}
 
     /* Print parameters  */
-    printf("Client’s parameters are:\n");
-    printf("serverIP: %s\n", server_ip_name);
-    printf("port: %d\n", server_port);
-    printf("directory: %s\n", directory);
+    //printf("Client’s parameters are:\n");
+    //printf("serverIP: %s\n", server_ip_name);
+    //printf("port: %d\n", server_port);
+    //printf("directory: %s\n", directory);
 
     /* Create socket */
     int sock;
@@ -57,7 +57,7 @@ int main(int argc, char* argv[]) {
     }
 
     /* Initiate connection */
-    printf("Connecting to %s on port %d\n", server_ip_name, server_port);
+    //printf("Connecting to %s on port %d\n", server_ip_name, server_port);
     struct sockaddr_in server;
     server.sin_family = AF_INET;            /* Internet domain */
     server.sin_addr.s_addr = server_ip;
